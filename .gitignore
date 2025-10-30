@@ -1,0 +1,14 @@
+# Virtual Environment
+venv/
+.venv/
+
+# IDE files
+.idea/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local Data & DB
+*.jsonl
+chroma_db/
