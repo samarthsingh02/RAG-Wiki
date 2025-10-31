@@ -1,153 +1,78 @@
 import streamlit as st
-from langchain_community.llms import Ollama
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_core.output_parsers import StrOutputParser
-
+import requests  # The library to make HTTP requests
 
 # --- Configuration ---
-PERSIST_DIRECTORY = "./chroma_db"  # Path to your persistent vector store
-LLM_MODEL = "mistral"  # The LLM you pulled
-EMBEDDING_MODEL = "nomic-embed-text"  # The embedding model you pulled
+API_URL = "http://127.0.0.1:8000/query"  # The URL of your FastAPI backend
 
+# --- Step 7: Re-built Frontend ---
 
-# --- Helper Function to Format Context ---
-def format_docs(docs):
-    """Prepares the context string from retrieved documents."""
-    return "\n\n---\n\n".join([d.page_content for d in docs])
-
-
-# --- Step 4: The RAG Core (Query Pipeline) ---
-
-@st.cache_resource  # Caches the "brain" of our app for performance
-def load_rag_pipeline():
-    """Loads all the necessary components for the RAG pipeline."""
-    try:
-        # 1. Initialize your models
-        llm = Ollama(model=LLM_MODEL)
-        embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
-
-        # 2. Load your existing database from disk
-        db = Chroma(
-            persist_directory=PERSIST_DIRECTORY,
-            embedding_function=embeddings
-        )
-
-        # 3. Create the retriever (fetches relevant documents)
-        retriever = db.as_retriever(
-            search_type="similarity",
-            search_kwargs={'k': 5}  # Retrieve the top 5 most similar chunks
-        )
-
-        # 4. Define the RAG Prompt Template
-        # This tells the LLM how to behave
-        template = """
-        You are an assistant for question-answering tasks.
-        Use the following pieces of retrieved context to answer the question.
-        If you don't know the answer, just say that you don't know.
-        Be concise and helpful.
-
-        CONTEXT:
-        {context}
-
-        QUESTION:
-        {question}
-
-        ANSWER:
-        """
-        prompt = ChatPromptTemplate.from_template(template)
-
-        # 5. Build the RAG Chain using LangChain Expression Language (LCEL)
-        rag_chain = (
-                {"context": retriever | format_docs, "question": RunnablePassthrough()}
-                | prompt
-                | llm
-                | StrOutputParser()
-        )
-
-        return rag_chain, retriever
-
-    except FileNotFoundError:
-        return None, None
-    except Exception as e:
-        st.error(f"An error occurred during pipeline setup: {e}")
-        return None, None
-
-
-# --- Step 5: Interactive UI ---
-
-st.set_page_config(page_title="Wikipedia RAG Assistant", layout="wide")
-st.title("Wikipedia RAG Assistant (RAG-Wiki-v1) 📚🤖")
+st.set_page_config(page_title="Wikipedia RAG v2", layout="wide")
+st.title("Wikipedia RAG Assistant (v2: API-Powered) 🚀")
 st.markdown("---")
 
-# Load the RAG pipeline
-rag_chain, retriever = load_rag_pipeline()
+col1, col2 = st.columns(2)
 
-if rag_chain is None:
-    st.error(
-        "**Failed to load RAG pipeline.** "
-        "Did you run `build_vector_store.py` first? "
-        "Is your `chroma_db` folder in the correct location?"
-    )
-else:
-    st.success(
-        f"RAG Pipeline loaded successfully. "
-        f"Using **{LLM_MODEL}** and **{EMBEDDING_MODEL}**."
+with col1:
+    st.header("Ask a Question")
+    st.markdown(
+        "This app is now powered by a separate FastAPI backend. "
+        "Type your question, and it will be sent to the API, "
+        "which will perform the RAG and return an answer."
     )
 
-    col1, col2 = st.columns(2)
+    # User input
+    query = st.text_input("Your question:", key="query_input")
 
-    with col1:
-        st.header("Ask a Question")
-        st.markdown(
-            "Ask any question about the topics you crawled (e.g., Deep Learning, AI, etc.). "
-            "The assistant will find relevant info from your 500+ articles and generate an answer."
-        )
+    if st.button("Get Answer", type="primary"):
+        if query:
+            with st.spinner("Sending query to API..."):
+                try:
+                    # --- THIS IS THE NEW LOGIC ---
+                    # 1. Prepare the JSON payload to send to the API
+                    payload = {"query": query}
 
-        # User input
-        query = st.text_input("Your question:", key="query_input")
+                    # 2. Make the POST request to your FastAPI backend
+                    response = requests.post(API_URL, json=payload, timeout=120)
 
-        if st.button("Get Answer", type="primary"):
-            if query:
-                with st.spinner("Thinking... (This may take a moment)"):
-                    try:
-                        # --- THIS IS WHERE THE MAGIC HAPPENS ---
-                        # 1. The RAG chain is invoked with your query
-                        # 2. The retriever finds relevant docs
-                        # 3. The docs and query go to the LLM
-                        # 4. The LLM generates an answer
-                        answer = rag_chain.invoke(query)
-                        # ----------------------------------------
+                    # 3. Handle the response
+                    if response.status_code == 200:
+                        data = response.json()
+                        answer = data.get("answer")
+                        sources = data.get("sources", [])
 
-                        st.subheader("Answer:")
+                        st.subheader("Answer from API:")
                         st.write(answer)
 
-                        # (Bonus) Display the source URLs
-                        with st.expander("Show Sources (Retrieved Context)"):
-                            # We can use the retriever separately to show the docs
-                            context_docs = retriever.invoke(query)
-                            for i, doc in enumerate(context_docs):
-                                st.markdown(f"**Source {i + 1}:** [View Article]({doc.metadata['source']})")
-                                st.markdown(
-                                    f"> {doc.page_content[:250]}..."
-                                )
-                                st.markdown("---")
+                        # (Bonus) Display the source URLs from the API
+                        with st.expander("Show Sources (from API)"):
+                            if sources:
+                                for i, source in enumerate(sources):
+                                    st.markdown(f"**Source {i+1}:** [{source.get('url')}]({source.get('url')})")
+                                    st.markdown(
+                                        f"> {source.get('content_snippet')}"
+                                    )
+                                    st.markdown("---")
+                            else:
+                                st.write("No sources returned from API.")
 
-                    except Exception as e:
-                        st.error(f"An error occurred while generating the answer: {e}")
-            else:
-                st.warning("Please enter a question.")
+                    else:
+                        st.error(f"Error from API: {response.status_code} - {response.text}")
+                    # -----------------------------
 
-    with col2:
-        st.header("How this works")
-        st.markdown(
-            """
-            1.  **Question:** You ask a question.
-            2.  **Embed:** Your question is converted into a vector (a list of numbers) using `nomic-embed-text`.
-            3.  **Retrieve:** The app searches the **ChromaDB** for text chunks with similar vectors (the 5 most relevant chunks are retrieved).
-            4.  **Augment:** Your question and the retrieved text chunks are combined into a single prompt.
-            5.  **Generate:** The `mistral` LLM receives this big prompt and generates a final answer based *only* on the provided context.
-            """
-        )
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Failed to connect to the API: {e}")
+                    st.warning("Is the backend_api/main.py server running?")
+        else:
+            st.warning("Please enter a question.")
+
+with col2:
+    st.header("New Architecture")
+    st.markdown(
+        """
+        1.  **Frontend (Streamlit):** You are interacting with this app. It does **not** have any LLMs or vector stores.
+        2.  **API Call (JSON):** When you ask a question, this Streamlit app sends a `POST` request to `http://127.0.0.1:8000/query` with your question.
+        3.  **Backend (FastAPI):** The server (running from `backend_api/main.py`) receives the request.
+        4.  **RAG Pipeline:** The backend server performs the *entire* RAG process: embedding your question, searching ChromaDB, and asking `mistral` to generate an answer.
+        5.  **API Response (JSON):** The backend sends the answer and sources back to this Streamlit app, which then displays it for you.
+        """
+    )
