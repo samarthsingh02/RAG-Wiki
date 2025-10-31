@@ -1,6 +1,8 @@
 import scrapy
 from scrapy.spiders import CrawlSpider, Rule
 from scrapy.linkextractors import LinkExtractor
+from bs4 import BeautifulSoup
+
 
 class WikiSpider(CrawlSpider):
     """
@@ -45,17 +47,24 @@ class WikiSpider(CrawlSpider):
         It extracts the text content and yields it as a Scrapy item.
         """
 
-        # Use CSS selectors to extract the clean paragraph text
-        # Selects all <p> tags inside the main content div
+        # 1. Extract the clean paragraph text (same as before)
         paragraphs = response.css('div#mw-content-text p::text').getall()
-
-        # Join all paragraphs into a single string, stripping whitespace
         all_paragraph_text = ' '.join(p.strip() for p in paragraphs if p.strip())
 
-        # Yield the data as a dictionary (a Scrapy "Item")
-        # This will be automatically collected by Scrapy and saved to our output file
-        if all_paragraph_text:  # Only save if we actually found text
+        # 2. Extract the "last modified" timestamp
+        # We use BeautifulSoup to parse the footer for the specific list item
+        soup = BeautifulSoup(response.body, 'html.parser')
+        last_mod_element = soup.select_one('li#footer-info-lastmod')
+        last_modified_text = ""
+        if last_mod_element:
+            # The text is like "This page was last modified on 31 October 2025, at 07:49."
+            # We just store the whole string for simplicity.
+            last_modified_text = last_mod_element.get_text(strip=True)
+
+        # 3. Yield the enhanced data (a Scrapy "Item")
+        if all_paragraph_text:
             yield {
                 'url': response.url,
-                'text': all_paragraph_text
+                'text': all_paragraph_text,
+                'last_modified': last_modified_text  # <-- NEWLY ADDED
             }

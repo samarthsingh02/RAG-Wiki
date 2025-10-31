@@ -2,9 +2,9 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
 
-from langchain_community.llms import Ollama
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.vectorstores import Chroma
+# Updated imports to new split packages suggested by LangChain deprecations
+from langchain_ollama import OllamaLLM, OllamaEmbeddings
+from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -16,7 +16,7 @@ EMBEDDING_MODEL = "nomic-embed-text"
 # --- 1. Initialize Models and Vector Store (Global) ---
 # We load these once when the API starts
 try:
-    llm = Ollama(model=LLM_MODEL)
+    llm = OllamaLLM(model=LLM_MODEL)
     embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
     db = Chroma(
         persist_directory=PERSIST_DIRECTORY,
