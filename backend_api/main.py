@@ -1,39 +1,62 @@
+import sys
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List
+from typing import List, Dict, Any
 
-# Updated imports to new split packages suggested by LangChain deprecations
+# --- Imports we know WORK in your environment ---
 from langchain_ollama import OllamaLLM, OllamaEmbeddings
 from langchain_chroma import Chroma
+from langchain_community.retrievers import BM25Retriever  # This one is in -community
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.documents import Document
+from sentence_transformers import CrossEncoder
 
 # --- Configuration ---
-PERSIST_DIRECTORY = "./chroma_db"  # Note: Relative to where you RUN the app
+PERSIST_DIRECTORY = "./chroma_db"
 LLM_MODEL = "mistral"
 EMBEDDING_MODEL = "nomic-embed-text"
 
-# --- 1. Initialize Models and Vector Store (Global) ---
-# We load these once when the API starts
+# --- 1. Load All Models and Retrievers (Global) ---
+print("--- Loading Models and Vector Store ---")
 try:
+    # LLM and Embedding Model
     llm = OllamaLLM(model=LLM_MODEL)
     embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL)
+
+    # ChromaDB Vector Store
     db = Chroma(
         persist_directory=PERSIST_DIRECTORY,
         embedding_function=embeddings
     )
-    retriever = db.as_retriever(
-        search_type="similarity",
-        search_kwargs={'k': 5}
+    chroma_retriever = db.as_retriever(search_kwargs={'k': 25}) # Get Top 25 vector results
+    print("--- ChromaDB Loaded ---")
+
+    # Load all docs from Chroma to initialize BM25
+    print("--- Loading docs from Chroma for BM25 ---")
+    # We need both the content and the metadata to pass to BM25
+    all_docs_data = db.get(include=["documents", "metadatas"])
+    all_texts = all_docs_data['documents']
+    all_metadatas = all_docs_data['metadatas']
+
+    # BM25 Keyword Retriever
+    bm25_retriever = BM25Retriever.from_texts(
+        all_texts,
+        metadatas=all_metadatas
     )
-    print("--- Models and Vector Store Loaded ---")
+    bm25_retriever.k = 25  # Get Top 25 keyword results
+    print("--- BM25 Retriever Initialized ---")
+
+    # Cross-Encoder Re-ranker Model
+    cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+    print("--- Cross-Encoder Re-ranker Loaded ---")
 
 except Exception as e:
-    print(f"--- Error loading models or vector store: {e} ---")
-    llm, retriever = None, None
+    print(f"--- FATAL ERROR loading models: {e} ---")
+    sys.exit(1)
 
-# --- 2. Define the RAG Prompt and lightweight chain ---
-# This prompt is slightly different, designed for simple string context injection
+
+# --- 2. Define the RAG Prompt and Chain (same as before) ---
 template = """
 You are an assistant for question-answering tasks.
 Use the following pieces of retrieved context to answer the question.
@@ -51,64 +74,76 @@ ANSWER:
 prompt = ChatPromptTemplate.from_template(template)
 parser = StrOutputParser()
 
-
-def _format_docs(docs) -> str:
-    """Join page contents of retrieved docs into a single context string."""
-    try:
-        return "\n\n".join(getattr(d, "page_content", "") for d in docs if getattr(d, "page_content", ""))
-    except Exception:
-        return ""
+def _format_docs(docs: List[Document]) -> str:
+    return "\n\n".join(doc.page_content for doc in docs if doc.page_content)
 
 print("--- RAG Components Ready ---")
 
 
-# --- 3. Define FastAPI App and Data Models ---
+# --- 3. Define FastAPI App and Data Models (same as before) ---
 app = FastAPI()
 
-
 class QueryRequest(BaseModel):
-    """Pydantic model for the input query."""
     query: str
 
-
 class SourceDocument(BaseModel):
-    """Pydantic model for a single source document."""
     url: str
     content_snippet: str
-
+    score: float  # We'll add the re-ranker's score now
 
 class QueryResponse(BaseModel):
-    """Pydantic model for the API response."""
     answer: str
     sources: List[SourceDocument]
 
 
-# --- 4. Define the API Endpoint ---
+# --- 4. Define the NEW API Endpoint Logic (MANUAL HYBRID SEARCH) ---
 @app.post("/query")
 async def handle_query(request: QueryRequest) -> QueryResponse:
     """
-    The main endpoint to ask questions to the RAG pipeline.
-    Accepts: {"query": "Your question here"}
-    Returns: {"answer": "...", "sources": [...]}
+    The main endpoint.
+    Manually performs 2-stage Hybrid Search + Re-ranking.
     """
-    if llm is None or retriever is None:
-        return QueryResponse(
-            answer="Error: RAG pipeline not initialized. Check server logs.",
-            sources=[]
-        )
 
-    # 1. Retrieve documents
+    # === STAGE 1: HYBRID SEARCH (MANUAL) ===
+    # 1. Get vector search results
     try:
-        docs = retriever.invoke(request.query)
+        vector_docs = chroma_retriever.invoke(request.query)
     except Exception:
-        # Fallback to the vectorstore retriever's legacy API if needed
-        try:
-            docs = retriever.get_relevant_documents(request.query)
-        except Exception:
-            docs = []
+        vector_docs = chroma_retriever.get_relevant_documents(request.query) # legacy
 
-    # 2. Build context and generate answer
-    context_text = _format_docs(docs)
+    # 2. Get keyword search results
+    try:
+        keyword_docs = bm25_retriever.invoke(request.query)
+    except Exception:
+        keyword_docs = bm25_retriever.get_relevant_documents(request.query) # legacy
+
+    # 3. Combine and de-duplicate the results
+    combined_docs = {doc.page_content: doc for doc in vector_docs + keyword_docs}.values()
+    retrieved_docs = list(combined_docs)
+
+    if not retrieved_docs:
+        return QueryResponse(answer="No relevant documents found.", sources=[])
+
+    # === STAGE 2: RE-RANKING (Find the Best 5) ===
+    # Create pairs of [query, document_text] for the Cross-Encoder
+    query_doc_pairs = [[request.query, doc.page_content] for doc in retrieved_docs]
+
+    # Run the Cross-Encoder to get relevance scores
+    scores = cross_encoder.predict(query_doc_pairs)
+
+    # Combine docs with their new scores
+    doc_scores = list(zip(retrieved_docs, scores))
+
+    # Sort by the new score in descending order
+    doc_scores_sorted = sorted(doc_scores, key=lambda x: x[1], reverse=True)
+
+    # Get the Top 5 re-ranked documents
+    top_5_docs_with_scores = doc_scores_sorted[:5]
+    top_5_docs = [doc for doc, score in top_5_docs_with_scores]
+
+    # === STAGE 3: GENERATE ANSWER (Same as before) ===
+    context_text = _format_docs(top_5_docs)
+
     try:
         answer = (prompt | llm | parser).invoke({
             "input": request.query,
@@ -117,22 +152,20 @@ async def handle_query(request: QueryRequest) -> QueryResponse:
     except Exception as e:
         answer = f"Error generating answer: {e}"
 
-    # 3. Format the sources
+    # Format the sources, now with the score
     response_sources: List[SourceDocument] = []
-    for doc in docs or []:
-        try:
-            url = (doc.metadata or {}).get('source') or (doc.metadata or {}).get('url') or 'Unknown'
-            snippet = (getattr(doc, 'page_content', '') or '')[:200] + '...'
-            response_sources.append(SourceDocument(url=url, content_snippet=snippet))
-        except Exception:
-            continue
+    for doc, score in top_5_docs_with_scores:
+        response_sources.append(SourceDocument(
+            url=doc.metadata.get('source', 'Unknown'),
+            content_snippet=doc.page_content[:200] + "...",
+            score=float(score)
+        ))
 
     return QueryResponse(
         answer=answer if isinstance(answer, str) else str(answer),
         sources=response_sources
     )
 
-
 @app.get("/")
 def read_root():
-    return {"message": "RAG-Wiki-v2 API is running. POST to /query to ask questions."}
+    return {"message": "RAG-Wiki-v2 API (Manual Hybrid Search + Re-ranker) is running."}
