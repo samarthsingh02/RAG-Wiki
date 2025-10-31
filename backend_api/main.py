@@ -1,7 +1,7 @@
 import sys
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List
 
 # --- Imports we know WORK in your environment ---
 from langchain_ollama import OllamaLLM, OllamaEmbeddings
@@ -32,7 +32,7 @@ try:
     chroma_retriever = db.as_retriever(search_kwargs={'k': 25}) # Get Top 25 vector results
     print("--- ChromaDB Loaded ---")
 
-    # Load all docs from Chroma to initialize BM25
+    # Load all docs from Chroma for BM25
     print("--- Loading docs from Chroma for BM25 ---")
     # We need both the content and the metadata to pass to BM25
     all_docs_data = db.get(include=["documents", "metadatas"])

@@ -14,3 +14,6 @@ __pycache__/
 chroma_db/
 
 processed_pages.db
+ollama_models/
+
+.tmp_dagster_home*/
