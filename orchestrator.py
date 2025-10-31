@@ -177,4 +177,4 @@ if __name__ == "__main__":
         assets=[crawled_articles_file, intelligent_vector_store],
         instance=DagsterInstance.ephemeral(),
     )
-    print(result.get_output_for_node("intelligent_vector_store"))
+    print(result.output_for_node("intelligent_vector_store"))
